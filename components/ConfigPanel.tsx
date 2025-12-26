@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ICONS } from '../constants';
+import { ICONS, GEO_CACHE_KEY } from '../constants';
 import { FleetConfigItem, Depot, DispatchMode, MapProvider } from '../types';
 
 interface ConfigPanelProps {
@@ -40,7 +40,7 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ params, setParams }) => {
 
   const updateCacheCount = () => {
     try {
-      const raw = localStorage.getItem('NANO_LOGISTICS_GEO_CACHE_V5_STABLE'); // Ensure key matches App.tsx
+      const raw = localStorage.getItem(GEO_CACHE_KEY); 
       if (raw) {
         const cache = JSON.parse(raw);
         setCacheCount(Object.keys(cache).length);
@@ -52,9 +52,30 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ params, setParams }) => {
 
   const clearCache = () => {
     if (window.confirm('确定要清空本地地址缓存吗？这会导致下次调度重新调用 API 接口。')) {
-      localStorage.removeItem('NANO_LOGISTICS_GEO_CACHE_V5_STABLE'); // Ensure key matches App.tsx
+      localStorage.removeItem(GEO_CACHE_KEY); 
       updateCacheCount();
       window.location.reload(); 
+    }
+  };
+
+  const downloadCache = () => {
+    try {
+      const raw = localStorage.getItem(GEO_CACHE_KEY);
+      if (!raw) {
+        alert('当前没有缓存数据可导出。');
+        return;
+      }
+      const blob = new Blob([raw], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `NanoLogistics_LBS_Cache_Backup_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('导出失败: ' + String(e));
     }
   };
 
@@ -335,11 +356,22 @@ const ConfigPanel: React.FC<ConfigPanelProps> = ({ params, setParams }) => {
           
           {activeSection === 'cache' && (
             <div className="px-8 pb-8 pt-2 animate-in fade-in slide-in-from-top-2 duration-500">
-               <div className="p-6 bg-slate-950/40 border border-slate-800 rounded-3xl flex items-center justify-between gap-6">
-                  <div className="flex-1">
-                     <p className="text-xs text-slate-400 leading-relaxed">系统已将过往调度的地址坐标存入本地，并记录了 24 小时效期。下次遇到相同地址将跳过 API 请求，极速响应并节省配额。</p>
+               <div className="p-6 bg-slate-950/40 border border-slate-800 rounded-3xl space-y-4">
+                  <div className="flex gap-6 items-start">
+                    <p className="flex-1 text-xs text-slate-400 leading-relaxed">
+                      系统采用严谨的地址比对算法（去除空格、全角转半角、忽略大小写）将坐标数据存入 <strong>LocalStorage</strong>，保留周期已升级为 <strong className="text-emerald-400">90 天</strong>。建议定期导出备份，防止意外丢失。
+                    </p>
+                    <div className="flex flex-col gap-2">
+                       <button onClick={downloadCache} className="px-6 py-2.5 bg-blue-600/20 border border-blue-500/30 text-blue-400 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-600 hover:text-white transition-all whitespace-nowrap flex items-center justify-center gap-2">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                          导出备份
+                       </button>
+                       <button onClick={clearCache} className="px-6 py-2.5 bg-red-600/10 border border-red-500/30 text-red-500 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-600 hover:text-white transition-all whitespace-nowrap flex items-center justify-center gap-2">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                          清空缓存
+                       </button>
+                    </div>
                   </div>
-                  <button onClick={clearCache} className="px-6 py-3 bg-red-600/10 border border-red-500/30 text-red-500 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-600 hover:text-white transition-all whitespace-nowrap">清空缓存</button>
                </div>
             </div>
           )}

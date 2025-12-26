@@ -1,6 +1,8 @@
 
 import React from 'react';
 
+export const GEO_CACHE_KEY = 'NANO_LOGISTICS_GEO_CACHE_V5_STABLE';
+
 export const DEPOT = {
   name: '江苏金发科技生产基地',
   address: '江苏省苏州市昆山市周市镇金发路1号',

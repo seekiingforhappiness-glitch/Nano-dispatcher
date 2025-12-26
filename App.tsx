@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ICONS, DEPOT, INITIAL_FLEET_CONFIG } from './constants';
-import { Order, Trip, DispatchStep, DispatchSummary, Vehicle, FleetConfigItem, FileHistoryItem, Depot, DispatchMode, MapProvider, Stop } from './types';
+import { ICONS, DEPOT, INITIAL_FLEET_CONFIG, GEO_CACHE_KEY } from './constants';
+import { Order, Trip, DispatchStep, DispatchSummary, Vehicle, FleetConfigItem, FileHistoryItem, Depot, DispatchMode, MapProvider, Stop, SystemLog, SystemMetrics, LogLevel } from './types';
 import Header from './components/Header';
 import ConfigPanel from './components/ConfigPanel';
 import UploadArea from './components/UploadArea';
@@ -8,15 +8,68 @@ import ProgressMonitor from './components/ProgressMonitor';
 import ResultDashboard from './components/ResultDashboard';
 import SummaryReport from './components/SummaryReport';
 import TechExpositor from './components/TechExpositor';
+import SystemMonitor from './components/SystemMonitor';
 
 // 生产级 API 安全管理
 const AVG_SPEED_KMH = 48; 
 const SERVICE_TIME_PER_STOP = 25; 
 const ROUTE_DETOUR_FACTOR = 1.32; 
-const GEO_CACHE_KEY = 'NANO_LOGISTICS_GEO_CACHE_V5_STABLE'; 
-const CACHE_EXPIRATION_MS = 24 * 60 * 60 * 1000;
+const CACHE_EXPIRATION_MS = 90 * 24 * 60 * 60 * 1000; // 升级为 90 天长效缓存
 
-let MEMORY_GEO_CACHE: Record<string, { lat: number, lng: number, timestamp?: number }> | null = null;
+let MEMORY_GEO_CACHE: Record<string, { lat: number, lng: number, timestamp?: number, level?: string, formattedAddress?: string }> | null = null;
+
+// Helper to safely extract error messages
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'object' && error !== null) {
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
+};
+
+// --- JSONP Adapter for CORS Bypass ---
+// 高德 Web 服务 API 不支持 CORS，必须使用 JSONP 在纯前端环境调用
+const jsonpAdapter = (url: string): Promise<any> => {
+  return new Promise((resolve, reject) => {
+    const callbackName = `amap_jsonp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    const script = document.createElement('script');
+    
+    // 增加超时控制
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('JSONP Request Timeout (5000ms)'));
+    }, 5000);
+
+    const cleanup = () => {
+      if (document.body.contains(script)) {
+        document.body.removeChild(script);
+      }
+      // @ts-ignore
+      delete window[callbackName];
+      clearTimeout(timeoutId);
+    };
+
+    // @ts-ignore
+    window[callbackName] = (data: any) => {
+      cleanup();
+      resolve(data);
+    };
+
+    // 拼接 callback 参数
+    const hasQuery = url.includes('?');
+    script.src = `${url}${hasQuery ? '&' : '?'}callback=${callbackName}&output=json`;
+    script.onerror = () => {
+      cleanup();
+      reject(new Error('JSONP Script Load Error'));
+    };
+
+    document.body.appendChild(script);
+  });
+};
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('INPUT');
@@ -38,6 +91,49 @@ const App: React.FC = () => {
   const [mapProvider, setMapProvider] = useState<MapProvider>(MapProvider.AMAP);
   const [amapKey, setAmapKey] = useState('41476da8b99afb1e40e3d2ac7ecc3e41');
 
+  // 系统监控状态
+  const [monitorOpen, setMonitorOpen] = useState(false);
+  const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
+  const [metrics, setMetrics] = useState<SystemMetrics>({
+    startTime: Date.now(),
+    apiCalls: 0,
+    cacheHits: 0,
+    errors: 0,
+    activeModules: ['System Kernel']
+  });
+
+  // 日志记录核心函数
+  const addLog = (level: LogLevel, module: string, message: string, details?: any, costMs?: number) => {
+    const newLog: SystemLog = {
+      id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      timestamp: Date.now(),
+      level,
+      module,
+      message,
+      details,
+      costMs
+    };
+    
+    setSystemLogs(prev => [...prev, newLog]);
+
+    setMetrics(prev => ({
+      ...prev,
+      errors: level === 'ERROR' ? prev.errors + 1 : prev.errors,
+      apiCalls: level === 'API' && module === 'LBS' ? prev.apiCalls + 1 : prev.apiCalls,
+      activeModules: prev.activeModules.includes(module) ? prev.activeModules : [...prev.activeModules, module]
+    }));
+
+    if (level === 'ERROR') {
+      console.error(`[${module}] ${message}`, details);
+    }
+  };
+
+  // 初始化日志
+  useEffect(() => {
+    addLog('INFO', 'BOOT', 'NanoSmart Logistics Dispatcher System Initialized', { version: '3.3 STABLE', env: 'Production' });
+    addLog('INFO', 'INIT', 'Map Visualization Engine Ready', { engine: 'React SVG Vector Map', amapJsSdk: 'Not Loaded (Using Lightweight Mode)' });
+  }, []);
+
   const addDepot = () => {
     const newDepot: Depot = {
       id: `depot-${Math.random().toString(36).substr(2, 9)}`,
@@ -47,11 +143,13 @@ const App: React.FC = () => {
       lat: depots[0].lat + (Math.random() - 0.5) * 0.05
     };
     setDepots(prev => [...prev, newDepot]);
+    addLog('INFO', 'CONFIG', 'Added new depot asset', { id: newDepot.id });
   };
 
   const removeDepot = (id: string) => {
     if (depots.length <= 1) return;
     setDepots(prev => prev.filter(d => d.id !== id));
+    addLog('INFO', 'CONFIG', 'Removed depot asset', { id });
   };
 
   const loadCache = () => {
@@ -59,36 +157,122 @@ const App: React.FC = () => {
       try {
         const raw = localStorage.getItem(GEO_CACHE_KEY);
         MEMORY_GEO_CACHE = raw ? JSON.parse(raw) : {};
-      } catch (e) { MEMORY_GEO_CACHE = {}; }
+        addLog('INFO', 'CACHE', 'Geocoding Cache Index Loaded', { 
+          totalEntries: Object.keys(MEMORY_GEO_CACHE!).length,
+          retentionPolicy: '90 Days',
+          storageKey: GEO_CACHE_KEY
+        });
+      } catch (e) { 
+        MEMORY_GEO_CACHE = {}; 
+        addLog('WARN', 'CACHE', 'Failed to load cache from LocalStorage', { error: getErrorMessage(e) });
+      }
     }
     return MEMORY_GEO_CACHE!;
   };
 
-  const getGeocode = async (address: string): Promise<{ lat: number, lng: number, isFault?: boolean }> => {
+  // 严谨的地址 Key 标准化：去空格、全角转半角、大写
+  const normalizeAddressKey = (addr: string) => {
+    return addr.trim().replace(/\s+/g, '').replace(/，/g, ',').toUpperCase();
+  };
+
+  const getGeocode = async (address: string): Promise<{ lat: number, lng: number, isFault?: boolean, level?: string, formattedAddress?: string }> => {
+    const startT = performance.now();
     const cache = loadCache();
-    if (cache[address] && cache[address].timestamp && (Date.now() - cache[address].timestamp < CACHE_EXPIRATION_MS)) {
-      return { ...cache[address], isFault: false };
+    const safeKey = normalizeAddressKey(address);
+    
+    // 1. CHECK CACHE (First Priority)
+    const cachedItem = cache[safeKey];
+    if (cachedItem && cachedItem.timestamp) {
+      const age = Date.now() - cachedItem.timestamp;
+      if (age < CACHE_EXPIRATION_MS) {
+        setMetrics(prev => ({ ...prev, cacheHits: prev.cacheHits + 1 }));
+        addLog('INFO', 'CACHE', `LBS Cache Hit [${cachedItem.level || 'Unknown'}]`, { 
+          input: address, 
+          key: safeKey, 
+          ageDays: (age / (24 * 3600 * 1000)).toFixed(1)
+        });
+        return { ...cachedItem, isFault: false };
+      }
     }
 
+    // 2. CHECK ENVIRONMENT
     if (mapProvider === MapProvider.OFFLINE || !amapKey) {
+      addLog('WARN', 'LBS', `Offline/Simulated Geocoding (No Key or Offline Mode): ${address.substring(0, 15)}...`);
       return { lat: depots[0].lat + (Math.random() - 0.5) * 0.4, lng: depots[0].lng + (Math.random() - 0.5) * 0.4, isFault: true };
     }
 
-    try {
-      const url = `https://restapi.amap.com/v3/geocode/geo?address=${encodeURIComponent(address)}&key=${amapKey}&city=${encodeURIComponent('江苏|上海')}`;
-      const res = await fetch(url).catch(() => { throw new Error('NETWORK_FAIL'); });
-      const data = await res.json();
-      
-      if (data.status === '1' && data.geocodes?.length > 0) {
-        const loc = data.geocodes[0].location.split(',');
-        const result = { lng: parseFloat(loc[0]), lat: parseFloat(loc[1]), timestamp: Date.now() };
-        cache[address] = result;
-        localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(cache));
-        return { ...result, isFault: false };
+    // 3. API CALL (With Retry & JSONP)
+    let retries = 0;
+    const MAX_RETRIES = 2; // 总共尝试 3 次
+
+    while (retries <= MAX_RETRIES) {
+      try {
+        const url = `https://restapi.amap.com/v3/geocode/geo?address=${encodeURIComponent(address)}&key=${amapKey}&city=${encodeURIComponent('江苏|上海')}`; // 限制在包邮区可提高精度
+        
+        addLog('API', 'LBS', `Invoking Amap Geocoding Service (${retries > 0 ? 'Retry ' + retries : 'Attempt 1'})`, { 
+          method: 'JSONP', // Explicitly denote JSONP
+          input: address
+        });
+        
+        // 使用 JSONP 替代 fetch 以解决 CORS 问题
+        const data = await jsonpAdapter(url);
+        
+        // 4. VALIDATE RESPONSE CODES
+        if (data.status === '1' && data.geocodes?.length > 0) {
+          const geoObj = data.geocodes[0];
+          const loc = geoObj.location.split(',');
+          
+          const result = { 
+            lng: parseFloat(loc[0]), 
+            lat: parseFloat(loc[1]), 
+            level: geoObj.level, // 记录解析级别 (e.g., 'No', 'District', 'Street')
+            formattedAddress: geoObj.formatted_address,
+            timestamp: Date.now() 
+          };
+          
+          // 5. PERSIST TO CACHE
+          try {
+            cache[safeKey] = result;
+            localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(cache));
+          } catch (storageErr) {
+            addLog('WARN', 'CACHE', 'LocalStorage Write Failed (Quota Exceeded)', { error: getErrorMessage(storageErr) });
+          }
+
+          const cost = performance.now() - startT;
+          addLog('INFO', 'LBS', `Geocoding Resolved [${result.level}]`, { 
+            input: address, 
+            matched: result.formattedAddress, 
+            gps: [result.lng, result.lat] 
+          }, Math.round(cost));
+          
+          return { ...result, isFault: false };
+        } else {
+          // 处理高德特定错误码
+          let faultMsg = `API returned Empty Result (Status: ${data.status})`;
+          if (data.info === 'INVALID_USER_KEY') faultMsg = 'API Key 无效或类型错误 (请检查是否为 Web服务 Key)';
+          if (data.info === 'DAILY_QUERY_OVER_LIMIT') faultMsg = '今日调用配额已耗尽';
+          if (data.info === 'ACCESS_TOO_FREQUENT') faultMsg = '并发过高，被限流';
+
+          addLog('WARN', 'LBS', faultMsg, { address, infocode: data.infocode, info: data.info });
+          
+          // 如果是 Key 问题或配额问题，重试没有意义，直接跳出
+          if (data.infocode === '10001' || data.infocode === '10003') break; 
+
+          // 如果只是没查到，也不用重试
+          if (data.count === '0') break;
+        }
+      } catch (e) {
+        retries++;
+        if (retries > MAX_RETRIES) {
+          addLog('ERROR', 'LBS', `Geocoding Network/JSONP Failed after ${MAX_RETRIES} retries`, { address, error: getErrorMessage(e) });
+        } else {
+          // 指数退避
+          await new Promise(r => setTimeout(r, 500 * Math.pow(2, retries - 1)));
+        }
       }
-    } catch (e) {
-      console.warn(`[LBS] 失败安全兜底: ${address}`);
     }
+    
+    // Fallback if all attempts fail
     return { lat: depots[0].lat + (Math.random() - 0.5) * 0.1, lng: depots[0].lng + (Math.random() - 0.5) * 0.1, isFault: true };
   };
 
@@ -100,6 +284,13 @@ const App: React.FC = () => {
 
   const solveDispatch = async () => {
     if (orders.length === 0) return;
+    
+    // 清空旧的执行日志（保留系统启动日志）
+    setSystemLogs(prev => prev.filter(l => l.module === 'BOOT' || l.module === 'INIT'));
+    setMetrics(prev => ({ ...prev, apiCalls: 0, errors: 0, cacheHits: 0 }));
+    
+    addLog('INFO', 'CORE', 'Starting Dispatch Engine', { orders: orders.length, config: { maxStops, dispatchMode, mapProvider } });
+
     setIsProcessing(true);
     stopSignal.current = false;
     setStep(DispatchStep.GEOCODING);
@@ -118,16 +309,26 @@ const App: React.FC = () => {
       }))
       .sort((a, b) => a.capacityKg - b.capacityKg);
     
+    addLog('INFO', 'FLEET', 'Vehicle Fleet Configured', { models: vehicles.map(v => v.type) });
+
     const geoOrders: Order[] = [];
     const geoFailures: string[] = [];
 
+    // Phase 1: Geocoding
+    addLog('INFO', 'PHASE', 'Phase 1: Geocoding Started');
     for (let i = 0; i < orders.length; i++) {
-      if (stopSignal.current) break;
+      if (stopSignal.current) {
+         addLog('WARN', 'CORE', 'Emergency Halt Triggered');
+         break;
+      }
       const order = orders[i];
       if (!order) continue; 
 
       const res = await getGeocode(order.address);
-      if (res.isFault) geoFailures.push(order.orderNo);
+      if (res.isFault) {
+        geoFailures.push(order.orderNo);
+        addLog('WARN', 'DATA', `Address Resolution Failed for Order ${order.orderNo}`, { address: order.address });
+      }
       const angle = Math.atan2(res.lat - depots[0].lat, res.lng - depots[0].lng);
       geoOrders.push({ 
         ...order, 
@@ -141,8 +342,21 @@ const App: React.FC = () => {
 
     if (stopSignal.current) { setIsProcessing(false); setStep(DispatchStep.IDLE); return; }
 
+    // Phase 2: Optimization
     setStep(DispatchStep.OPTIMIZING);
-    const sorted = geoOrders.sort((a, b) => a.angle! - b.angle!);
+    addLog('INFO', 'PHASE', 'Phase 2: Optimization (Polar Sweep + Bin Packing)');
+    
+    // Explicitly log that we are using local math for routing to save quota
+    addLog('INFO', 'ROUTING', 'Service Check: Driving Route API (v3/direction/driving)', { 
+      status: 'SKIPPED', 
+      reason: 'Using Local Math Engine to conserve API Quota (Concurrency Limit Protection)',
+      method: 'Euclidean + Detour Factor (1.32)'
+    });
+
+    const algoStartT = performance.now();
+    const sorted = geoOrders.sort((a, b) => a.angle! - b.angle!); // Polar Sweep
+    addLog('ALGO', 'SORT', 'Orders sorted by Polar Angle', { count: sorted.length });
+
     const finalTrips: Trip[] = [];
     const fleetMix: Record<string, number> = {};
 
@@ -151,7 +365,12 @@ const App: React.FC = () => {
     const absMaxV = vehicles[vehicles.length - 1];
 
     sorted.forEach((o, idx) => {
-      if (curW + o.weightKg > absMaxV.capacityKg || curP + o.pallets > absMaxV.capacityPallets || currentGroup.length >= maxStops) {
+      // Constraints Check
+      const weightOk = curW + o.weightKg <= absMaxV.capacityKg;
+      const palletsOk = curP + o.pallets <= absMaxV.capacityPallets;
+      const stopsOk = currentGroup.length < maxStops;
+
+      if (!weightOk || !palletsOk || !stopsOk) {
         if (currentGroup.length > 0) createTrip(currentGroup);
         currentGroup = [o]; curW = o.weightKg; curP = o.pallets;
       } else {
@@ -170,6 +389,7 @@ const App: React.FC = () => {
       let lastPos = { lat: depots[0].lat, lng: depots[0].lng };
       const stops: Stop[] = [];
       
+      // Nearest Neighbor (Simple Sequence for now)
       group.forEach((s, i) => {
         const targetPos = { lat: s.lat || 0, lng: s.lng || 0 };
         const dist = calcDist(lastPos, targetPos);
@@ -188,11 +408,13 @@ const App: React.FC = () => {
         });
         lastPos = targetPos;
       });
-      dTotal += calcDist(lastPos, depots[0]);
+      dTotal += calcDist(lastPos, depots[0]); // Return to depot
 
       fleetMix[v.type] = (fleetMix[v.type] || 0) + 1;
+      const tripId = `T-${101 + finalTrips.length}`;
+      
       finalTrips.push({
-        id: `T-${101 + finalTrips.length}`,
+        id: tripId,
         vehicle: v,
         orders: group, totalWeight: wSum, totalPallets: pSum,
         totalDistance: parseFloat(dTotal.toFixed(1)),
@@ -200,7 +422,12 @@ const App: React.FC = () => {
         estimatedCost: v.baseCost + dTotal * v.costPerKm,
         stops, depot: depots[0]
       });
+      
+      addLog('ALGO', 'TRIP', `Generated Trip ${tripId}`, { vehicle: v.type, stops: group.length, utilization: `${Math.round(wSum/v.capacityKg*100)}%` });
     }
+
+    const algoCost = performance.now() - algoStartT;
+    addLog('INFO', 'PHASE', 'Optimization Completed', { tripsGenerated: finalTrips.length }, Math.round(algoCost));
 
     setTrips(finalTrips);
     setSummary({
@@ -216,6 +443,14 @@ const App: React.FC = () => {
     setStep(DispatchStep.COMPLETED);
     setIsProcessing(false);
     setActiveTab('RESULTS');
+    addLog('INFO', 'CORE', 'Dispatch Process Finished Successfully');
+  };
+
+  const handleUpload = (data: Order[]) => {
+    setOrders(data); 
+    setTrips([]); 
+    setSummary(null);
+    addLog('INFO', 'UPLOAD', 'File Uploaded and Parsed', { rows: data.length });
   };
 
   return (
@@ -239,11 +474,7 @@ const App: React.FC = () => {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* LEFT COLUMN: ACTION CENTER (Sticky) */}
             <div className="lg:col-span-4 space-y-6 sticky top-28">
-              <UploadArea onUpload={(data) => { 
-                setOrders(data); 
-                setTrips([]); 
-                setSummary(null); 
-              }} />
+              <UploadArea onUpload={handleUpload} />
               
               {/* Contextual Action Panel */}
               <div className="glass-panel p-1 rounded-[32px] border-slate-800 bg-slate-900/40 overflow-hidden transition-all duration-500">
@@ -304,6 +535,9 @@ const App: React.FC = () => {
         {activeTab === 'REPORT' && <SummaryReport summary={summary!} />}
         {activeTab === 'DOCS' && <TechExpositor />}
       </main>
+
+      {/* 注入全链路监控模组 */}
+      <SystemMonitor logs={systemLogs} metrics={metrics} isOpen={monitorOpen} setIsOpen={setMonitorOpen} />
     </div>
   );
 };

@@ -101,3 +101,24 @@ export enum DispatchStep {
   OPTIMIZING = '排线选车优化',
   COMPLETED = '生成结果文件',
 }
+
+// System Monitor Types
+export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'API' | 'ALGO';
+
+export interface SystemLog {
+  id: string;
+  timestamp: number;
+  level: LogLevel;
+  module: string; // e.g., 'GEOCODER', 'CORE', 'UI'
+  message: string;
+  details?: any; // JSON stringifiable object
+  costMs?: number; // Time taken for operation
+}
+
+export interface SystemMetrics {
+  startTime: number;
+  apiCalls: number;
+  cacheHits: number;
+  errors: number;
+  activeModules: string[];
+}
