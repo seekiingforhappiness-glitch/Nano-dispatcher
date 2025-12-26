@@ -1,0 +1,7 @@
+{
+  "name": "NanoSmart Logistics Dispatcher",
+  "description": "A production-grade intelligent logistics scheduling tool for automated multi-stop route planning and fleet optimization, designed for Jinfa Technology Kunshan Base.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
